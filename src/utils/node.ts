@@ -5,10 +5,13 @@ import path from "node:path";
 import sea from "node:sea";
 import fsAsync from "node:fs/promises";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import { allResourcesPath, getResourcePaths, versionResourcePath } from "./constants.js";
 import { getVersion } from "./version.js";
 
 const ASSET_PATH_SEP = "____";
+const packageRequire = createRequire(import.meta.url);
+const packageRoot = path.dirname(packageRequire.resolve("../../package.json"));
 
 type AssetType = "native" | "shell" | "spec";
 type ResourcePaths = ReturnType<typeof getResourcePaths>;
@@ -84,7 +87,7 @@ const permissionNativeModules = async (resources: ResourcePaths): Promise<void> 
 
 const unpackSpecs = async (resources: ResourcePaths): Promise<void> => {
   if (!sea.isSea()) {
-    const autocompleteSpecFolderPath = path.join(process.cwd(), "node_modules", "@withfig", "autocomplete", "build");
+    const autocompleteSpecFolderPath = path.join(path.dirname(packageRequire.resolve("@withfig/autocomplete/package.json")), "build");
     const entries = await fsAsync.readdir(autocompleteSpecFolderPath, { recursive: true });
     const files = entries
       .filter((f) => {
@@ -105,7 +108,7 @@ const unpackSpecs = async (resources: ResourcePaths): Promise<void> => {
 
 const unpackShellFiles = async (resources: ResourcePaths): Promise<void> => {
   if (!sea.isSea()) {
-    const shellFolderPath = path.join(process.cwd(), "shell");
+    const shellFolderPath = path.join(packageRoot, "shell");
     const files = (await fsAsync.readdir(shellFolderPath)).map((f) => path.basename(f));
 
     await copyFiles("shell", files, shellFolderPath, resources);
