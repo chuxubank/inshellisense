@@ -1,0 +1,308 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+import path from "node:path";
+import { getGeneratorSuggestions } from "./generatorCache.js";
+import { getGeneratorQueryTerm } from "./generator.js";
+import { runTemplates } from "./template.js";
+import log from "../utils/log.js";
+import { escapePath } from "./utils.js";
+import { addPathSeparator, endsWithPathSeparator, getPathDirname, removePathSeparator } from "../utils/shell.js";
+import { getConfig } from "../utils/config.js";
+export var SuggestionIcons;
+(function (SuggestionIcons) {
+    SuggestionIcons["File"] = "\uD83D\uDCC4";
+    SuggestionIcons["Folder"] = "\uD83D\uDCC1";
+    SuggestionIcons["Subcommand"] = "\uD83D\uDCE6";
+    SuggestionIcons["Option"] = "\uD83D\uDD17";
+    SuggestionIcons["Argument"] = "\uD83D\uDCB2";
+    SuggestionIcons["Mixin"] = "\uD83C\uDFDD\uFE0F";
+    SuggestionIcons["Shortcut"] = "\uD83D\uDD25";
+    SuggestionIcons["Special"] = "\u2B50";
+    SuggestionIcons["Default"] = "\uD83D\uDCC0";
+})(SuggestionIcons || (SuggestionIcons = {}));
+export const NerdFontIcons = {
+    alert: "\udb80\udc27",
+    android: "\ue70e",
+    apple: "\ue711",
+    asterisk: "\uf069",
+    aws: "\ue7ad",
+    azure: "\ue754",
+    box: "\uf1b2",
+    carrot: "\uef3b",
+    characters: "\udb82\udf34",
+    commandkey: "\udb81\ude33",
+    commit: "\ue729",
+    cpu: "\uf4bc",
+    database: "\ue706",
+    discord: "\uf1ff",
+    docker: "\ue7b0",
+    firebase: "\ue787",
+    flag: "\udb80\udd4f",
+    gcloud: "\udb84\uddf6",
+    git: "\ue702",
+    github: "\ue709",
+    gitlab: "\ue7eb",
+    gradle: "\ue7f2",
+    heroku: "\ue77b",
+    invite: "\udb83\udebb",
+    kubernetes: "\ue81d",
+    netlify: "\ue83c",
+    node: "\ued0d",
+    npm: "\ued0e",
+    slack: "\ue8a4",
+    string: "\udb84\udc21",
+    twitter: "\uf099",
+    vercel: "\ue8d3",
+    yarn: "\ue8ec",
+};
+const getIcon = (icon, suggestionType) => {
+    // eslint-disable-next-line no-control-regex
+    if (icon && /[^\u0000-\u00ff]/.test(icon)) {
+        return icon;
+    }
+    if (icon && icon.startsWith("fig://icon?type=") && getConfig().useNerdFont) {
+        const iconType = icon.split("fig://icon?type=")[1].toLowerCase();
+        const iconUtf = NerdFontIcons[iconType];
+        if (iconUtf != null && iconUtf !== "") {
+            return iconUtf;
+        }
+    }
+    switch (suggestionType) {
+        case "arg":
+            return SuggestionIcons.Argument;
+        case "file":
+            return SuggestionIcons.File;
+        case "folder":
+            return SuggestionIcons.Folder;
+        case "option":
+            return SuggestionIcons.Option;
+        case "subcommand":
+            return SuggestionIcons.Subcommand;
+        case "mixin":
+            return SuggestionIcons.Mixin;
+        case "shortcut":
+            return SuggestionIcons.Shortcut;
+        case "special":
+            return SuggestionIcons.Special;
+    }
+    return SuggestionIcons.Default;
+};
+const getLong = (suggestion) => {
+    return suggestion instanceof Array ? suggestion.reduce((p, c) => (p.length > c.length ? p : c)) : suggestion;
+};
+const getPathy = (type) => {
+    return type === "file" || type === "folder";
+};
+const toSuggestion = (suggestion, name, type) => {
+    if (suggestion.name == null)
+        return;
+    return {
+        name: name ?? getLong(suggestion.name),
+        description: suggestion.description,
+        icon: getIcon(suggestion.icon, type ?? suggestion.type),
+        allNames: suggestion.name instanceof Array ? suggestion.name : [suggestion.name],
+        priority: getSuggestionPriority(suggestion),
+        insertValue: suggestion.insertValue,
+        type: suggestion.type,
+        hidden: suggestion.hidden,
+    };
+};
+const getSuggestionPriority = (suggestion) => {
+    const isOption = suggestion.type === "option" ||
+        (suggestion.name instanceof Array
+            ? suggestion.name.some((n) => n.startsWith("--") || n.startsWith("-"))
+            : suggestion?.name?.startsWith("--") || suggestion?.name?.startsWith("-"));
+    if (isOption)
+        return 45;
+    return suggestion.priority ?? 50;
+};
+function filter(suggestions, filterStrategy, partialCmd, suggestionType) {
+    if (!partialCmd)
+        return suggestions.map((s) => toSuggestion(s, undefined, suggestionType)).filter((s) => s != null);
+    const normalizedPartialCmd = partialCmd.toLowerCase();
+    switch (filterStrategy) {
+        case "fuzzy":
+            return suggestions
+                .map((s) => {
+                if (s.name == null)
+                    return;
+                if (s.name instanceof Array) {
+                    const matchedName = s.name.find((n) => n.toLowerCase().includes(normalizedPartialCmd));
+                    return matchedName != null
+                        ? {
+                            name: matchedName,
+                            description: s.description,
+                            icon: getIcon(s.icon, s.type ?? suggestionType),
+                            allNames: s.name,
+                            priority: s.priority ?? 50,
+                            insertValue: s.insertValue,
+                            type: s.type,
+                            hidden: s.hidden,
+                        }
+                        : undefined;
+                }
+                return s.name.toLowerCase().includes(normalizedPartialCmd)
+                    ? {
+                        name: s.name,
+                        description: s.description,
+                        icon: getIcon(s.icon, s.type ?? suggestionType),
+                        allNames: [s.name],
+                        priority: s.priority ?? 50,
+                        insertValue: s.insertValue,
+                        type: s.type,
+                        hidden: s.hidden,
+                    }
+                    : undefined;
+            })
+                .filter((s) => s != null);
+        default:
+            return suggestions
+                .map((s) => {
+                if (s.name == null)
+                    return;
+                if (s.name instanceof Array) {
+                    const matchedName = s.name.find((n) => n.toLowerCase().startsWith(normalizedPartialCmd));
+                    return matchedName != null
+                        ? {
+                            name: matchedName,
+                            description: s.description,
+                            icon: getIcon(s.icon, s.type ?? suggestionType),
+                            allNames: s.name,
+                            insertValue: s.insertValue,
+                            priority: s.priority ?? 50,
+                            type: s.type,
+                            hidden: s.hidden,
+                        }
+                        : undefined;
+                }
+                return s.name.toLowerCase().startsWith(normalizedPartialCmd)
+                    ? {
+                        name: s.name,
+                        description: s.description,
+                        icon: getIcon(s.icon, s.type ?? suggestionType),
+                        allNames: [s.name],
+                        insertValue: s.insertValue,
+                        priority: s.priority ?? 50,
+                        type: s.type,
+                        hidden: s.hidden,
+                    }
+                    : undefined;
+            })
+                .filter((s) => s != null);
+    }
+}
+const generatorSuggestions = async (generator, allTokens, filterStrategy, partialCmd, cwd, debounce, signal) => {
+    const generators = generator instanceof Array ? generator : generator ? [generator] : [];
+    const tokens = allTokens.map((t) => t.token);
+    const activeToken = allTokens.at(-1)?.complete === false ? allTokens.at(-1)?.token ?? "" : "";
+    signal?.throwIfAborted();
+    return (await Promise.all(generators.map(async (generator) => filter((await getGeneratorSuggestions(generator, tokens, activeToken, cwd, debounce, signal)).map((suggestion) => ({
+        ...suggestion,
+        priority: suggestion.priority ?? 60,
+    })), filterStrategy, generator.getQueryTerm == null ? partialCmd : getGeneratorQueryTerm(generator, activeToken), undefined)))).flat();
+};
+const templateSuggestions = async (templates, filterStrategy, partialCmd, cwd, signal) => {
+    return filter(await runTemplates(templates ?? [], cwd, signal), filterStrategy, partialCmd, undefined);
+};
+const suggestionSuggestions = (suggestions, filterStrategy, partialCmd) => {
+    const cleanedSuggestions = suggestions?.map((s) => (typeof s === "string" ? { name: s } : s)) ?? [];
+    return filter(cleanedSuggestions ?? [], filterStrategy, partialCmd, undefined);
+};
+const subcommandSuggestions = (subcommands, filterStrategy, partialCmd) => {
+    return filter(subcommands ?? [], filterStrategy, partialCmd, "subcommand");
+};
+const optionSuggestions = (options, acceptedTokens, filterStrategy, partialCmd) => {
+    const usedOptions = new Set(acceptedTokens.filter((t) => t.isOption).map((t) => t.token));
+    const validOptions = options?.filter((o) => o.exclusiveOn?.every((exclusiveOption) => !usedOptions.has(exclusiveOption)) ?? true);
+    return filter(validOptions ?? [], filterStrategy, partialCmd, "option");
+};
+function adjustPathSuggestions(suggestions, partialToken, lastToken, shell) {
+    const isInPath = lastToken?.isPath && !lastToken.complete;
+    const isSpecialPathCharacter = (s) => s.name === "~";
+    return suggestions.map((s) => {
+        const specialPathy = isInPath && isSpecialPathCharacter(s);
+        const pathy = getPathy(s.type) || specialPathy;
+        const rawInsertValue = removePathSeparator(s.insertValue ?? s.name ?? "");
+        const insertValue = s.type == "folder" || specialPathy ? addPathSeparator(rawInsertValue, shell) : rawInsertValue;
+        const partialDir = getPathDirname(partialToken?.token ?? "", shell);
+        const isPartialTokenPath = partialToken?.isPath && endsWithPathSeparator(partialDir, shell);
+        const fullPath = isPartialTokenPath ? `${partialDir}${insertValue}` : insertValue;
+        return pathy ? { ...s, insertValue: escapePath(fullPath, shell), name: removePathSeparator(s.name) } : s;
+    });
+}
+const removeAcceptedSuggestions = (suggestions, acceptedTokens) => {
+    const seen = new Set(acceptedTokens.map((t) => t.token));
+    return suggestions.filter((s) => s.allNames.every((n) => !seen.has(n)));
+};
+const removeDuplicateSuggestion = (suggestions) => {
+    const seen = new Set();
+    return suggestions
+        .map((s) => {
+        if (seen.has(s.name))
+            return null;
+        seen.add(s.name);
+        return s;
+    })
+        .filter((s) => s != null);
+};
+const removeHiddenSuggestions = (suggestions, partialToken) => {
+    return suggestions.filter((s) => s.hidden !== true || (partialToken != null && s.name === partialToken.token));
+};
+const removeHomeDirectorySuggestion = (suggestions, allTokens) => {
+    const containsHomeDir = allTokens.some((t) => t.token.startsWith("~"));
+    return suggestions.filter((s) => s.type !== "folder" || !containsHomeDir || !s.name.startsWith("~"));
+};
+const removeEmptySuggestion = (suggestions) => {
+    return suggestions.filter((s) => s.name.length > 0);
+};
+export const getSubcommandDrivenRecommendation = async (subcommand, persistentOptions, partialToken, argsDepleted, argsFromSubcommand, acceptedTokens, allTokens, cwd, shell, signal) => {
+    log.debug({ msg: "suggestion point", subcommand, persistentOptions, partialToken, argsDepleted, argsFromSubcommand, acceptedTokens, cwd });
+    if (argsDepleted && argsFromSubcommand) {
+        return;
+    }
+    let partialCmd = partialToken?.token;
+    if (partialToken?.isPath) {
+        partialCmd = partialToken.isPathComplete ? "" : path.basename(partialCmd ?? "");
+    }
+    const lastToken = allTokens.at(-1);
+    const suggestions = [];
+    const argLength = subcommand.args instanceof Array ? subcommand.args.length : subcommand.args ? 1 : 0;
+    const allOptions = persistentOptions.concat(subcommand.options ?? []);
+    if (!argsFromSubcommand) {
+        suggestions.push(...subcommandSuggestions(subcommand.subcommands, subcommand.filterStrategy, partialCmd));
+        suggestions.push(...optionSuggestions(allOptions, acceptedTokens, subcommand.filterStrategy, partialCmd));
+    }
+    if (argLength != 0) {
+        const activeArg = subcommand.args instanceof Array ? subcommand.args[0] : subcommand.args;
+        const debounce = activeArg?.debounce === true;
+        suggestions.push(...(await generatorSuggestions(activeArg?.generators, allTokens, activeArg?.filterStrategy, partialCmd, cwd, debounce, signal)));
+        suggestions.push(...suggestionSuggestions(activeArg?.suggestions, activeArg?.filterStrategy, partialCmd));
+        suggestions.push(...(await templateSuggestions(activeArg?.template, activeArg?.filterStrategy, partialCmd, cwd, signal)));
+    }
+    return {
+        suggestions: removeDuplicateSuggestion(removeEmptySuggestion(removeHiddenSuggestions(removeHomeDirectorySuggestion(removeAcceptedSuggestions(adjustPathSuggestions(suggestions.sort((a, b) => b.priority - a.priority), partialToken, lastToken, shell), acceptedTokens), allTokens), partialToken))),
+    };
+};
+export const getArgDrivenRecommendation = async (args, subcommand, persistentOptions, partialToken, acceptedTokens, allTokens, variadicArgBound, cwd, shell, signal) => {
+    let partialCmd = partialToken?.token;
+    if (partialToken?.isPath) {
+        partialCmd = partialToken.isPathComplete ? "" : path.basename(partialCmd ?? "");
+    }
+    const lastToken = allTokens.at(-1);
+    const activeArg = args[0];
+    const allOptions = persistentOptions.concat(subcommand.options ?? []);
+    const debounce = activeArg?.debounce === true;
+    const suggestions = [
+        ...(await generatorSuggestions(args[0].generators, allTokens, activeArg?.filterStrategy, partialCmd, cwd, debounce, signal)),
+        ...suggestionSuggestions(args[0].suggestions, activeArg?.filterStrategy, partialCmd),
+        ...(await templateSuggestions(args[0].template, activeArg?.filterStrategy, partialCmd, cwd, signal)),
+    ];
+    if (activeArg.isOptional || (activeArg.isVariadic && variadicArgBound)) {
+        suggestions.push(...subcommandSuggestions(subcommand.subcommands, activeArg?.filterStrategy, partialCmd));
+        suggestions.push(...optionSuggestions(allOptions, acceptedTokens, activeArg?.filterStrategy, partialCmd));
+    }
+    return {
+        suggestions: removeDuplicateSuggestion(removeEmptySuggestion(removeHiddenSuggestions(removeHomeDirectorySuggestion(removeAcceptedSuggestions(adjustPathSuggestions(suggestions.sort((a, b) => b.priority - a.priority), partialToken, lastToken, shell), acceptedTokens), allTokens), partialToken))),
+        argumentDescription: activeArg.description ?? activeArg.name,
+    };
+};

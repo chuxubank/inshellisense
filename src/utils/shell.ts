@@ -342,7 +342,7 @@ fi`;
     is -s bash --login ; exit
   else
     is -s bash ; exit
-  fi 
+  fi
 fi`;
     case Shell.Powershell:
     case Shell.Pwsh:
@@ -359,7 +359,7 @@ if ([string]::IsNullOrEmpty($env:ISTERM) -and [Environment]::UserInteractive -an
     is -s fish --login ; kill %self
   else
     is -s fish ; kill %self
-  end 
+  end
 end`;
     case Shell.Xonsh:
       return `if 'ISTERM' not in \${...} and $XONSH_INTERACTIVE and 'VSCODE_RESOLVING_ENVIRONMENT' not in \${...}:
